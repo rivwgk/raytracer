@@ -1,12 +1,14 @@
 module geometry
    use iso_fortran_env, wp => real64
+   use ieee_arithmetic
+   use utility
    implicit none
 
    type Ray
       real(wp) :: o(3), d(3)
       real(wp) :: t
    contains
-      procedure, pass(arg) :: normalize => normalize_ray
+      procedure, pass(r) :: at => point_on_ray
    end type Ray
 
    type Material
@@ -22,50 +24,33 @@ module geometry
       type(Material) :: mat
    end type Intersection
 
-   type, abstract :: Object
+   type ObjGeometry
       real(wp)       :: lum
       type(Material) :: m
-   end type Object
+   end type ObjGeometry
 
-   type, extends(Object) :: Sphere
+   type, extends(ObjGeometry) :: Sphere
       real(wp) :: p(3)
       real(wp) :: r
    contains
       procedure, pass(s) :: intersect => sphere_intersect
    end type Sphere
 
-   type, extends(Object) :: Plane
+   type, extends(ObjGeometry) :: Plane
       real(wp) :: n(3), p(3)
    contains
       procedure, pass(p) :: intersect => plane_intersect
    end type Plane
 
-   type, extends(Object) :: Triangle
-      real(wp) :: a(3), b(3), c(3)
-   contains
-      procedure, pass(t) :: intersect => triangle_intersect
-   end type Triangle
+   type Object
+      type(ObjGeometry) :: geom
+   end type Object
 contains
-   pure subroutine cross(a, b, c)
+   subroutine point_on_ray(r, p)
       implicit none
-      real(wp), intent(in) :: a(3), b(3)
-      real(wp), intent(out) :: c(3)
-      c(1) = a(2) * b(3) - a(3) * b(2)
-      c(2) = a(3) * b(1) - a(1) * b(3)
-      c(3) = a(1) * b(2) - a(2) * b(1)
-   end subroutine
-
-   subroutine point_on_ray(p, r)
-      implicit none
+      class(Ray), intent(in) :: r
       real(wp), intent(out) :: p(3)
-      type(Ray), intent(in) :: r
       p = r%o + r%t * r%d
-   end subroutine
-
-   subroutine normalize_ray(arg)
-      implicit none
-      class(Ray), intent(inout) :: arg
-      arg%d = arg%d / norm2(arg%d)
    end subroutine
 
    subroutine plane_intersect(p, r, hit, isect)
@@ -74,19 +59,20 @@ contains
       type(Ray), intent(inout)   :: r
       logical, intent(inout)     :: hit
       type(Intersection), intent(inout) :: isect
-      real(wp)                   :: t
+      real(wp)                   :: a,b,c,t
 
-      if (dot_product(p%n, r%d) .le. epsilon(t)) then
-      !if (abs(dot_product(p%n, r%d)) .le. epsilon(t)) then
+      c = dot_product(p%n, r%d)
+      if (abs(c) .le. 10. * epsilon(t)) then
          return ! ray nearly parallel to plane, no hit
       endif
 
-      t = (dot_product(p%n,p%p - r%o) / dot_product(p%n, r%d))
-      if (0 .lt. t .and. t .lt. r%t) then
+      a = dot_product(p%n, p%p - r%o)
+      t = (a / c)
+      if (epsilon(t) .lt. t .and. t .lt. r%t) then
          r%t = t
          hit = .true.
-         call point_on_ray(isect%pos, r)
-         isect%n= p%n
+         call r%at(isect%pos)
+         isect%n = p%n
          isect%mat = p%m
          isect%lum = p%lum
       endif
@@ -98,40 +84,29 @@ contains
       type(Ray), intent(inout)   :: r
       logical, intent(inout)     :: hit
       type(Intersection), intent(inout) :: isect
-      real(wp)                   :: t1, t2, dd, root, o(3), solution
+      real(wp)                   :: t1, t2, dd, root, q(3), solution
 
-      dd = dot_product(r%d, r%d) ! as the direction is normalized this is 1
-      o = r%o - s%p
-      root = (dot_product(r%d,o))**2 - (dot_product(o,o) - s%r**2)
-      if (root .le. 0) then ! no real solution
+      dd = dot_product(r%d,r%d) ! the direction is normalized, this should be 1
+      q = s%p - r%o
+      root = (dot_product(r%d,q)/dd)**2 - (dot_product(q,q) - s%r**2)/dd
+      if (root .lt. 0) then ! no real solution
          return
       endif
-      t1 = dot_product(r%d,o) - root
-      t2 = dot_product(r%d,o) + root
+      t1 = dot_product(r%d,q)/dd - root
+      t2 = dot_product(r%d,q)/dd + root
       solution = min(t1, t2)
       if (solution .le. 0) then
          solution = max(t1, t2)
       endif
-      if (solution .le. 0) then
-         return
-      endif
-      if (solution .le. r%t) then
+      if ((epsilon(0.0_wp) .lt. solution) .and. (solution .lt. r%t)) then
          hit = .true.
          r%t = solution
-         call point_on_ray(isect%pos, r)
+         call r%at(isect%pos)
          isect%n= isect%pos - s%p
-         isect%n= isect%n/ norm2(isect%n)
+         call normalize(isect%n)
          isect%mat = s%m
          isect%lum = s%lum
       endif
-   end subroutine
-
-   subroutine triangle_intersect(t, r, hit, isect)
-      implicit none
-      class(Triangle), intent(in):: t
-      type(Ray), intent(inout)   :: r
-      logical, intent(inout)     :: hit
-      type(Intersection), intent(inout) :: isect
    end subroutine
 
    function make_plane(normal, pos, m) result(p)
@@ -139,7 +114,8 @@ contains
       real(wp), intent(in)       :: normal(3), pos(3)
       type(Material), intent(in) :: m
       type(Plane)                :: p
-      p%n = normal / norm2(normal)
+      p%n = normal
+      call normalize(p%n)
       p%p = pos
       p%m = m
    end function make_plane
@@ -153,15 +129,6 @@ contains
       s%r = r
       s%m = m
    end function make_sphere
-
-   function make_triangle(u, v, w) result(t)
-      implicit none
-      real(wp), intent(in)       :: u(3), v(3), w(3)
-      type(Triangle)             :: t
-      t%a = u
-      t%b = v
-      t%c = w
-   end function make_triangle
 
    function make_material(color, is_diffuse, is_mirror, shininess) result(m)
       implicit none
@@ -194,11 +161,10 @@ contains
    function mirror(m, normal, r_in, r_out) result(w)
       implicit none
       class(Material), intent(in) :: m
-      real(wp), intent(in) :: normal(3), r_in(3), r_out(3)
-      real(wp)             :: w, v(3)
-      ! o - <o,i>/<i,i>
-      v = 2.0_wp * dot_product(normal, r_in) * normal - r_in
-      if (norm2(v - r_out) .lt. 10 * epsilon(w)) then
+      real(wp), intent(in) :: normal(3),r_in(3),r_out(3)
+      real(wp)             :: w,v(3)
+      v = 2.0_wp*dot_product(r_in,normal)*normal-r_in
+      if (norm2(v - r_out) .lt. 0.1) then
          w = 1.0_wp
       else
          w = 0.0_wp
@@ -210,8 +176,8 @@ contains
       class(Material), intent(in) :: m
       real(wp), intent(in) :: normal(3), r_in(3), r_out(3)
       real(wp)             :: w, v(3)
-      v = 2.0_wp * dot_product(normal, r_in) * normal - r_in
-      w = dot_product(v, r_out) ** m%shininess
+      v = 2.0_wp*dot_product(normal,r_in)*normal-r_in
+      w = dot_product(r_out,v) ** m%shininess
    end function phong
 
    function absorb(m, normal, r_in, r_out) result(w)
@@ -222,71 +188,107 @@ contains
       w = 0.0_wp
    end function absorb
 
-   subroutine shade(isect, c, spheres, planes, triangles, w_out, n)
+   subroutine intersect_all(r,hit,isect,planes,spheres)
+      implicit none
+      type(Ray), intent(inout)        :: r
+      logical, intent(out)            :: hit
+      type(Intersection), intent(out) :: isect
+      type(Plane), intent(in)         :: planes(:)
+      type(Sphere), intent(in)        :: spheres(:)
+      integer :: k
+      do k = 1, size(planes, 1)
+         call planes(k)%intersect(r, hit, isect)
+      end do
+      do k = 1, size(spheres, 1)
+         call spheres(k)%intersect(r, hit, isect)
+      end do
+   end subroutine
+
+   recursive subroutine shade(isect,c,spheres,planes,w_out,n,depth,rands,qmc)
       implicit none
       type(Intersection), intent(in) :: isect
       type(Intersection)             :: is
       real(wp), intent(out)          :: c(3)
       type(Plane), intent(in)        :: planes(:)
       type(Sphere), intent(in)       :: spheres(:)
-      type(Triangle), intent(in)     :: triangles(:)
       real(wp), intent(in)           :: w_out(3)
       real(wp),parameter :: pi = 4.0_wp * atan(1.0_wp)
-      integer, intent(in)            :: n
-      integer                        :: i,k
-      real(wp)                       :: phi,theta,v(3),w_in(3),m(3,3),w
-      real(wp)                       :: acc(3)
+      real(wp),parameter :: square = pi * 0.5_wp * pi * 2.0_wp
+      real(wp),parameter :: hemisphere = 4.0_wp/2.0_wp * pi
+      integer, intent(in)            :: n, depth
+      integer                        :: i,j,k,rep,max_rep
+      real(wp)                       :: phi,theta,v(3),m(3,3),w
+      real(wp)                       :: acc(3), racc(3),area
+      real(wp)                       :: rands(:,:,:)
       type(Ray)                      :: r
-      logical                        :: hit
-      acc = 0
+      logical                        :: hit,qmc
+      max_rep = size(rands,3)
+      area = square
+      acc = 0.0_wp
       do i = 1, n
-         call random_number(theta)
-         call random_number(phi)
-         theta = acos(theta)
-         phi = phi * 2 * pi
-         v(1) = sin(theta) * cos(phi)
-         v(2) = sin(theta) * sin(phi)
-         v(3) = cos(theta)
-         r%o = isect%pos
-         call localglobalrot(isect%n, m)
-         w_in = reshape(matmul(m, reshape(v, [3, 1])), [3])
-         w_in = w_in / norm2(w_in)
-         r%d = w_in
-         r%t = 100000.0_wp
-         hit = .false.
-         do k = 1, size(planes, 1)
-            call planes(k)%intersect(r, hit, is)
+         do rep = 1,max_rep
+
+            theta = rands(1,i,rep)
+            phi   = rands(2,i,rep)
+            call eval_mc(real(i,wp),real(n,wp),theta,phi)
+!           call eval_mc_H2(real(i,wp),real(n,wp),theta,phi)
+!           call eval_mc_cos(real(i,wp),real(n,wp),theta,phi)
+            v = [sin(theta) * cos(phi), sin(theta) * sin(phi), cos(theta)]
+            r%o = isect%pos
+            call localglobalrot(isect%n, m)
+            r%d = reshape(matmul(m, reshape(v, [3, 1])), [3])
+            call normalize(r%d)
+            r%t = 1000000.0_wp
+            hit = .false.
+            call intersect_all(r, hit, is, planes, spheres)
+            if (hit) then
+               if (depth .gt. 0) then
+                  if (is%lum .eq. 0.0_wp) then
+                     call shade(is,racc,spheres,planes,-r%d,n,depth-1,rands,qmc)
+                  else
+                     racc = is%lum * is%mat%c
+                  end if
+                  acc = acc + racc
+               else
+                  acc = acc + is%lum * cos(theta) * &
+                        isect%mat%c * isect%mat%shade(isect%n, r%d, w_out)
+               end if
+            end if
+
          end do
-         do k = 1, size(spheres, 1)
-            call spheres(k)%intersect(r, hit, is)
-         end do
-         do k = 1, size(triangles, 1)
-            call triangles(k)%intersect(r, hit, is)
-         end do
-         if (hit) then
-            acc = acc + is%lum * cos(theta) * &! isect%mat%c * &
-                  isect%mat%shade(isect%n, w_in, w_out)
-         end if
       end do
-      c = acc * pi**2 / n
+      c = acc * area /(n*max_rep)
    contains
-      subroutine localglobalrot(normal, m)
+      subroutine eval_midpoint(n,i,m,j,theta,phi)
          implicit none
-         real(wp), intent(in) :: normal(3)
-         real(wp), intent(out) :: m(3,3)
-         real(wp)             :: xvec(3), yvec(3)
-         xvec = [1.0_wp, 0.0_wp, 0.0_wp]
-         if (norm2(xvec - normal) < 0.00001_wp) then
-            xvec = [1.0_wp, 1.0_wp, 0.0_wp] / sqrt(2.0_wp)
-         end if
-         xvec = xvec - dot_product(xvec, normal) * normal
-         xvec = xvec / norm2(xvec)
-         call cross(normal, xvec, yvec)
-         yvec = yvec / norm2(yvec)
-         m(1:3,1) = xvec
-         m(1:3,2) = yvec
-         m(1:3,3) = normal
-         m = transpose(m)
-      end subroutine localglobalrot
+         real(wp),intent(in) :: n,i,m,j
+         real(wp),intent(out) :: theta,phi
+         theta = i / n * 0.5_wp * pi
+         phi = j / m * 2.0_wp * pi
+      end subroutine
+      ! theta-phi, standard monte-carlo
+      subroutine eval_mc(n,i,theta,phi)
+         implicit none
+         real(wp),intent(in) :: n,i
+         real(wp),intent(inout) :: theta,phi
+         theta = theta * 0.5_wp * pi
+         phi = phi * 2.0_wp * pi
+      end subroutine
+      ! 
+      subroutine eval_mc_H2(n,i,theta,phi)
+         implicit none
+         real(wp),intent(in) :: n,i
+         real(wp),intent(inout) :: theta,phi
+         theta = acos(theta)
+         phi = phi * 2.0_wp * pi
+      end subroutine
+      ! important sampling
+      subroutine eval_mc_cos(n,i,theta,phi)
+         implicit none
+         real(wp),intent(in) :: n,i
+         real(wp),intent(inout) :: theta,phi
+         theta = acos(sqrt(theta))
+         phi = phi * 2.0_wp * pi
+      end subroutine
    end subroutine shade
 end module geometry

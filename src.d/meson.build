@@ -1,3 +1,5 @@
-sources  = files('geometry.f90')
+sources  = files('utility.f90')
+sources += files('geometry.f90')
 sources += files('rendering.f90')
 sources += files('main.f90')
+sources += files('halton_advanced.f90')

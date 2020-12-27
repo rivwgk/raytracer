@@ -13,12 +13,13 @@ contains
       implicit none
       real(wp), intent(in) :: pos(3), dir(3), up(3)
       real(wp), intent(in) :: fov, length
+      real(wp), parameter :: pi = 4.0_wp * atan(1.0_wp)
       integer, intent(in) :: res_x, res_y
       type(Camera) :: cam
       cam%pos = pos
       cam%dir = dir
       cam%up = up
-      cam%fov = fov * atan(1.0_wp) / 90.0_wp
+      cam%fov = fov * pi / 180.0_wp
       cam%length = length
       cam%xdim = res_x
       cam%ydim = res_y
@@ -31,48 +32,57 @@ contains
       type(Ray)                  :: r
       integer, intent(in)        :: x, y
       real(wp)                   :: dx, dy, res_max 
-      res_max = tan(cam%fov) * cam%length
+      res_max = tan(cam%fov / 2.0_wp) * cam%length
       dx = 2 * res_max / cam%xdim
       dy = 2 * res_max / cam%ydim
-      r%o = [ 0., 0., 0. ]
-      r%d(1) = r%o(1) -res_max + x * dx
-      r%d(2) = r%o(2) +res_max - y * dy
+      r%o = cam%pos
+      r%d(1) = r%o(1) - res_max + x * dx
+      r%d(2) = r%o(2) - res_max + y * dy
       r%d(3) = r%o(3) + cam%length
-      r%t = 10000.0_wp
-      call r%normalize()
+      r%t = huge(r%t)
+      call normalize(r%d)
    end function
 
-   subroutine render_cam(cam, filename, spheres, planes, triangles)
+   subroutine render_cam(cam, filename, spheres, planes)
       implicit none
       type(Camera), intent(inout):: cam
       character(*), intent(in)   :: filename
       type(Sphere), intent(in)   :: spheres(:)
       type(Plane), intent(in)    :: planes(:)
-      type(Triangle), intent(in) :: triangles(:)
       type(Ray)                  :: r
-      integer                    :: i, j, k
-      integer, parameter         :: n = 64
+      integer                    :: i, j, k, dim, x, y
+      integer, parameter         :: n = 2**8, depth = 0
       logical                    :: hit
+      logical,parameter          :: qmc = .false.
       type(Intersection)         :: isect
       real(wp)                   :: c(3)
+      real(wp),allocatable       :: rands(:,:,:)
+      if (qmc) then
+         dim = 1 
+      else
+         dim = 20
+      endif
+      allocate(rands(2,n,dim))
+      if (qmc) then
+         call halton_sequence(2,n,rands(:,:,1))
+      else
+         call random_number(rands)
+      endif
+      print*,'tracing rays...'
+!$omp parallel do &
+!$omp num_threads(8) &
+!$omp shared(cam,spheres,planes,rands) &
+!$omp private(r,isect,c,hit,i,j,k)
       do i = 1,cam%ydim
          do j = 1,cam%xdim
             hit = .false.
             r = generate_ray(cam, j, i)
-            do k = 1, size(planes, 1)
-               call planes(k)%intersect(r, hit, isect)
-            end do
-            do k = 1, size(spheres, 1)
-               call spheres(k)%intersect(r, hit, isect)
-            end do
-            do k = 1, size(triangles, 1)
-               call triangles(k)%intersect(r, hit, isect)
-            end do
+            call intersect_all(r,hit,isect,planes,spheres)
             if (hit) then
                if (isect%lum .eq. 0.0_wp) then
-                  call shade(isect, c, spheres, planes, triangles, -r%d, n)
+                  call shade(isect,c,spheres,planes,-r%d,n,depth,rands(:,:,:),qmc)
                else
-                  c = isect%lum !isect%mat%c
+                  c = isect%lum * isect%mat%c
                endif
                cam%img(j, i, 1:3) = c
             else
@@ -80,7 +90,8 @@ contains
             endif
          end do
       end do
-
+!$omp end parallel do
+      deallocate(rands)
       call save_to_file(cam, filename)
    end subroutine
 
@@ -92,14 +103,14 @@ contains
       integer,parameter :: byte = selected_int_kind(2)
       integer(byte),parameter :: zero = 0_byte
       integer(byte),parameter :: urgb = 2_byte
-      integer(byte),allocatable :: img(:,:,:)
+!     integer(byte),allocatable :: img(:,:,:)
       real(wp)                  :: sup, inf
-      logical,parameter :: greyscale = .true.
+      logical,parameter :: greyscale = .false.
       sup = maxval(cam%img)
       inf = minval(cam%img)
       print*,'Writing to disk: ' // filename,sup,inf
-      allocate(img(cam%xdim,cam%ydim,3))
-      img = nint(255 * (cam%img - inf) / (sup - inf), byte)
+!     allocate(img(cam%xdim,cam%ydim,3))
+!     img = nint(255 * (cam%img - inf) / (sup - inf), byte)
       open(newunit=u, file=filename, access='stream')
       write(u) zero
       write(u) zero
@@ -121,41 +132,25 @@ contains
       write(u) zero
       do i=1,cam%ydim
          do j=1,cam%xdim
-            if (greyscale) then
-               write(u) img(j, i, 3)  ! b
-               write(u) img(j, i, 2)  ! g
-               write(u) img(j, i, 1)  ! r
-            else 
-               write(u) nint(cam%img(j, i, 3), byte) !img(j, i, 3)  ! b
-               write(u) nint(cam%img(j, i, 2), byte) !img(j, i, 2)  ! g
-               write(u) nint(cam%img(j, i, 1), byte) !img(j, i, 1)  ! r
-            endif
+!           if (greyscale) then
+!              write(u) img(j, i, 3)  ! b
+!              write(u) img(j, i, 2)  ! g
+!              write(u) img(j, i, 1)  ! r
+!           else 
+               write(u) nint(cam%img(j, i, 3)/sup * 255, byte) !img(j, i, 3)  ! b
+               write(u) nint(cam%img(j, i, 2)/sup * 255, byte) !img(j, i, 2)  ! g
+               write(u) nint(cam%img(j, i, 1)/sup * 255, byte) !img(j, i, 1)  ! r
+!           endif
             write(u) int(Z'FF', byte)
          enddo
       enddo
       close(u)
-      deallocate(img)
+!     deallocate(img)
    contains
       pure elemental integer function clamp(val,minval,maxval)
          implicit none
          integer,intent(in) :: val,minval,maxval
          clamp = max(minval,min(maxval,val))
       end function clamp
-      subroutine hsltorgb(hsl, rgb)
-         implicit none
-         real(wp),intent(in) :: hsl(3)
-         real(wp),intent(out) :: rgb(3)
-         rgb = [f(hsl(1), hsl(2), hsl(3), 2.0_wp), &
-                f(hsl(1), hsl(2), hsl(3), 0.0_wp), &
-                f(hsl(1), hsl(2), hsl(3), 4.0_wp)]
-      end subroutine hsltorgb
-      function f(H, S, L, n) result(p)
-         implicit none
-         real(wp),intent(in) :: H,S,L,n
-         real(wp) :: a,k,p
-         k = modulo((n + H / 60.0_wp), 6.0_wp)
-         a = S * min(L, 1._wp - L)
-         p = L - a + 2._wp * a * max(min(k, 4.0_wp - k, 1.0_wp), 0.0_wp)
-      end function f
    end subroutine
 end module rendering
